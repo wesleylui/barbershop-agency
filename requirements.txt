@@ -1,0 +1,6 @@
+anthropic
+supabase
+python-dotenv
+requests
+apscheduler
+discord-webhook
