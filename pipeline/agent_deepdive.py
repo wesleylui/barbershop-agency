@@ -24,6 +24,18 @@ MODEL = "claude-sonnet-4-5-20250929"
 INSTAGRAM_RE = re.compile(r"https?://(?:www\.)?instagram\.com/[\w\.\-/]+", re.IGNORECASE)
 FACEBOOK_RE = re.compile(r"https?://(?:www\.)?facebook\.com/[\w\.\-/]+", re.IGNORECASE)
 
+# Cap on scraped content echoed back into the conversation. run.py's own lead
+# dict already truncates scraped_content to 5000 chars before storage, so this
+# just applies that same ceiling one step earlier — no reason to let a large
+# page balloon every subsequent turn's input tokens for the rest of the loop.
+MAX_SCRAPE_CHARS = 5000
+
+# Reused verbatim by both the dossier loop and the generator prompt below —
+# wrapped in a helper so both call sites get prompt caching (see cached_system())
+# instead of copy-pasting the cache_control block twice.
+def cached_system(text: str) -> list:
+    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+
 
 # ---------------------------------------------------------------------------
 # Plain-function tools the agent can call. Each one degrades gracefully like
@@ -68,7 +80,15 @@ def detect_social_links(content: str) -> dict:
     itself a real signal — per Matthew's own operating knowledge, most
     barbershop clientele comes through Instagram, not the website, so a shop
     with no discoverable Instagram link is a bigger red flag than a mediocre
-    booking flow."""
+    booking flow.
+
+    Not exposed as its own agent tool (it was in the first version of this
+    file — see design note in the report). It runs automatically as part of
+    scrape_site's result instead, because making it a separate tool call
+    forced the model to echo the entire scraped page back out as a JSON tool
+    argument just to ask a deterministic regex to run on it — pure output-
+    token waste for zero reasoning benefit. Still a plain, directly testable
+    function; just not a round-trip."""
     if not content:
         return {
             "instagram_found": False,
@@ -134,7 +154,7 @@ def generate_industry_scorer(industry: str, context: str = "") -> Path | None:
         message = client.messages.create(
             model=MODEL,
             max_tokens=1200,
-            system=GENERATOR_SYSTEM_PROMPT,
+            system=cached_system(GENERATOR_SYSTEM_PROMPT),
             messages=[{"role": "user", "content": user_message}],
         )
     except Exception as e:
@@ -185,12 +205,12 @@ gathered against these rules):
 
 Two things this agency's existing one-shot scorer does NOT do, that you must:
 
-1. Social presence. Scan any scraped content for Instagram/Facebook links (the
-   detect_social_links tool does the regex work — you reason about what it means). Most
-   barbershop clientele comes through Instagram, not the website. A shop with no
-   discoverable Instagram is a bigger red flag than a mediocre booking flow, not a minor
-   footnote — weigh it that way in your summary and leaks_found, and note it even when
-   the rest of the funnel looks fine.
+1. Social presence. scrape_site's result already includes a "social" field (Instagram/
+   Facebook links found via regex, run automatically — you don't need to call anything
+   separately for this) — you reason about what it means. Most barbershop clientele comes
+   through Instagram, not the website. A shop with no discoverable Instagram is a bigger
+   red flag than a mediocre booking flow, not a minor footnote — weigh it that way in your
+   summary and leaks_found, and note it even when the rest of the funnel looks fine.
 2. Funnel reasoning, not a rule lookup. Don't just apply the INFERENCE RULES as a
    checklist. Write actual analysis: is the booking link an embed or does it redirect
    off-site? Does it look like a specific service gets pre-selected, or does the visitor
@@ -231,20 +251,15 @@ TOOLS = [
     },
     {
         "name": "scrape_site",
-        "description": "Scrape a website URL and return its markdown content. Only call this if find_business returned a website.",
+        "description": (
+            "Scrape a website URL and return its markdown content plus an automatic social-link "
+            "scan (Instagram/Facebook, found by regex — already done for you in the result, no "
+            "separate call needed). Only call this if find_business returned a website."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {"url": {"type": "string"}},
             "required": ["url"],
-        },
-    },
-    {
-        "name": "detect_social_links",
-        "description": "Scan text for Instagram/Facebook links via regex. Call this on scraped website content, if any was retrieved.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"content": {"type": "string"}},
-            "required": ["content"],
         },
     },
     {
@@ -318,6 +333,12 @@ TOOLS = [
             },
             "required": ["business_name", "raw_signals", "funnel_analysis", "summary", "lead_record"],
         },
+        # This tool list is static across every call in the loop and across every
+        # dossier run — cache_control on the last tool tells the API to cache
+        # everything up through here, so turns 2+ of the same run (and any
+        # dossier run within the ~5 min cache TTL) read this at the cheaper
+        # cache-read rate instead of paying full input price every time.
+        "cache_control": {"type": "ephemeral"},
     },
 ]
 
@@ -331,9 +352,14 @@ def _dispatch_tool(name: str, tool_input: dict) -> dict:
         )
     if name == "scrape_site":
         content = scrape_website(tool_input.get("url", ""))
-        return {"content": content, "length": len(content)}
-    if name == "detect_social_links":
-        return detect_social_links(tool_input.get("content", ""))
+        social = detect_social_links(content)
+        truncated = len(content) > MAX_SCRAPE_CHARS
+        return {
+            "content": content[:MAX_SCRAPE_CHARS],
+            "length": len(content),
+            "truncated": truncated,
+            "social": social,
+        }
     if name == "generate_industry_scorer":
         path = generate_industry_scorer(tool_input.get("industry", ""), tool_input.get("context", ""))
         return {"saved_to": str(path) if path else None}
@@ -360,7 +386,7 @@ def run_dossier_agent(business_name: str, city: str = "Calgary", niche: str = "b
             response = client.messages.create(
                 model=MODEL,
                 max_tokens=2000,
-                system=DOSSIER_SYSTEM_PROMPT,
+                system=cached_system(DOSSIER_SYSTEM_PROMPT),
                 tools=TOOLS,
                 messages=messages,
             )
