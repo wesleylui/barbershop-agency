@@ -5,6 +5,7 @@ from pipeline.maps import get_shops
 from pipeline.scraper import scrape_website
 from pipeline.scorer import score_shop
 from pipeline.database import insert_lead, lead_exists, insert_pipeline_run
+from pipeline.notifier import post_run_summary
 
 
 def cheap_filter(shops: list[dict]) -> list[dict]:
@@ -39,6 +40,7 @@ def run_pipeline(city: str, niche: str):
 
     scored = 0
     qualified = 0
+    top_leads = []
 
     for shop in filtered:
         name = shop["name"]
@@ -83,6 +85,8 @@ def run_pipeline(city: str, niche: str):
 
         insert_lead(lead)
         print(f"[run] Saved: {name} — {verdict} ({result.get('total_score')})")
+        if verdict in ("Priority", "Qualified"):
+            top_leads.append(lead)
 
     insert_pipeline_run({
         "city": city,
@@ -93,6 +97,17 @@ def run_pipeline(city: str, niche: str):
         "shops_qualified": qualified,
         "status": "complete",
     })
+
+    top_leads.sort(key=lambda x: x.get("total_score") or 0, reverse=True)
+    post_run_summary(
+        city=city,
+        niche=niche,
+        found=found,
+        after_filter=after_filter,
+        scored=scored,
+        qualified=qualified,
+        top_leads=top_leads[:5],
+    )
 
     print(
         f"\n[run] Done: {found} found | {after_filter} passed filter "
