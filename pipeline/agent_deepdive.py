@@ -369,7 +369,7 @@ def _dispatch_tool(name: str, tool_input: dict) -> dict:
     return {"error": f"unknown tool '{name}'"}
 
 
-def run_dossier_agent(business_name: str, city: str = "Calgary", niche: str = "barbershop", max_turns: int = 8) -> dict | None:
+def run_dossier_agent(business_name: str, city: str = "Calgary", niche: str = "barbershop", max_turns: int = 5) -> dict | None:
     client = anthropic.Anthropic()
     messages = [
         {
@@ -424,6 +424,16 @@ def run_dossier_agent(business_name: str, city: str = "Calgary", niche: str = "b
 
         if finalized is not None:
             return finalized
+
+        # Incremental cache breakpoint: mark the last tool_result block of this
+        # turn as cacheable. Anthropic caches everything up to a cache_control
+        # breakpoint, so next turn's call reads system + tools + every prior
+        # turn (all now behind this breakpoint) at cache-read price instead of
+        # full input price. Without this, only the static system/tools portion
+        # was cached — the part of the prompt that actually grows every turn
+        # (the accumulating tool-call history) was paying full price each time.
+        if tool_results:
+            tool_results[-1] = {**tool_results[-1], "cache_control": {"type": "ephemeral"}}
 
         messages.append({"role": "user", "content": tool_results})
 
