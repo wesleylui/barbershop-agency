@@ -61,6 +61,16 @@ def get_leads_by_status(status: str) -> list[dict]:
         return []
 
 
+def insert_pipeline_run(run_dict: dict) -> dict | None:
+    client = _get_client()
+    try:
+        result = client.table("pipeline_runs").insert(run_dict).execute()
+        return result.data[0] if result.data else None
+    except Exception as e:
+        print(f"[database] insert_pipeline_run failed: {e}")
+        return None
+
+
 def get_all_outcomes() -> list[dict]:
     client = _get_client()
     try:
