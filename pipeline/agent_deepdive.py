@@ -30,6 +30,7 @@ FACEBOOK_RE = re.compile(r"https?://(?:www\.)?facebook\.com/[\w\.\-/]+", re.IGNO
 # page balloon every subsequent turn's input tokens for the rest of the loop.
 MAX_SCRAPE_CHARS = 5000
 
+
 # Reused verbatim by both the dossier loop and the generator prompt below —
 # wrapped in a helper so both call sites get prompt caching (see cached_system())
 # instead of copy-pasting the cache_control block twice.
@@ -111,42 +112,103 @@ def _slugify(industry: str) -> str:
     return slug or "industry"
 
 
+def _rubric_path_for(niche: str) -> Path:
+    return PROMPTS_DIR / f"scoring_{_slugify(niche)}.txt"
+
+
+# ---------------------------------------------------------------------------
+# Industry rubric generation. Rewritten so the model reasons about how the
+# industry actually acquires and closes customers BEFORE it drafts scores —
+# it used to just relabel the barbershop rubric's booking-platform names,
+# which quietly broke for anything that isn't an instant-booking business
+# (a contractor's "utilization" isn't a % of slots filled — there are no
+# slots. It's closer to how fast they respond to a lead and how backed up
+# their project pipeline already is, and a long lead time to start a new job
+# is a GOOD demand signal there, the opposite of how "over 90% booked" reads
+# for a barbershop). See generate_industry_scorer's docstring for how this
+# gets called.
+# ---------------------------------------------------------------------------
+
 GENERATOR_SYSTEM_PROMPT = f"""You are designing a new lead-scoring rubric for an AI SMB marketing
 agency's qualification pipeline. The agency currently only scores barbershops. You are
 extending it to a new industry.
 
-Here is the existing barbershop rubric. Your new rubric MUST match its structure and
-JSON schema exactly: the same three signals (team/ability-to-pay, utilization, funnel),
-the same section headers, and the exact same OUTPUT field names
-(team_score, util_score, funnel_score, total_score, verdict, leaks_found, outreach_hook).
-Keep the RULES section (total_score formula and verdict thresholds) unchanged — only
-re-derive what each signal actually measures and how it's scored for the new industry's
-real-world proxies. Ability to pay should map to whatever this industry's equivalent of
-"chair/barber count" is. Utilization should map to whatever this industry's equivalent of
-"% booked" is, and the point thresholds should reflect how that industry actually books
-(e.g. longer scheduling horizons look "fuller" sooner than same-day service businesses).
-Funnel quality/booking-embed logic likely transfers directly, but confirm it fits and use
-that industry's own common booking platforms in the inference rules, not the barbershop
-ones.
+STEP 1 — Before you touch the rubric, figure out how this industry actually gets and closes
+customers. Do not assume it works like a barbershop. Ask yourself which of these (or
+something else entirely) actually fits:
 
---- EXISTING RUBRIC (barbershop) ---
+- INSTANT / SELF-SERVICE booking — the customer picks a specific time slot themselves,
+  same-day or short-notice (barbershops, salons, gyms, restaurants). Here "utilization"
+  genuinely means % of appointment slots filled, and the funnel is about whether that
+  booking widget is easy to use.
+- QUOTE / PROJECT business — the customer submits an inquiry or asks for an estimate, the
+  business quotes it, and the actual work gets scheduled with its own lead time
+  (construction, roofing, remodeling, landscaping, HVAC installs, other contractors). "%
+  of slots booked" means nothing here — there is no slot. What actually signals demand is
+  closer to: how fast do they respond to an inquiry, how far out is their project
+  backlog/lead time, do they even have a quote-request path on the site or is it
+  phone-only. A LONG lead time to start a new job is a GOOD demand signal for this kind of
+  business (busy, in demand) — the opposite of how "over 90% booked" reads as a cap-out
+  problem for a barbershop. Being able to start next week with an empty backlog is closer
+  to a red flag.
+- Recurring/contract service (cleaning, lawn care, pest control), longer-horizon
+  appointment business (dental, legal, medical specialists), or another model entirely —
+  reason about THIS industry specifically instead of defaulting to a booking-fill-rate
+  model because that's what the reference rubric below uses.
+
+Get this right before you write anything. A wrong assumption here (e.g. treating a
+contractor's booked-out project calendar as a funnel problem instead of a demand signal)
+makes every downstream score wrong, not just imprecise.
+
+STEP 2 — Draft the rubric. It MUST match the existing rubric's structure and JSON schema
+exactly: the same three signals in the same order, the same OUTPUT field names
+(team_score, util_score, funnel_score, total_score, verdict, leaks_found, outreach_hook),
+and the RULES section (the total_score formula and the verdict point thresholds) UNCHANGED
+— these are a normalized 0-10 scale per signal on purpose, so scores stay comparable
+across industries no matter what each one measures underneath. What changes is what each
+signal actually MEASURES for this industry, based on your Step 1 reasoning. You may adjust
+each section header's parenthetical/description to name what it actually measures (e.g.
+"SIGNAL 2 — UTILIZATION SCORE (0-10, lead response & project backlog)" instead of forcing
+a booking-percentage framing that doesn't apply) — keep the section order and the
+underlying JSON field names exactly as they are.
+
+- Ability to pay (team_score) → this industry's real proxy for scale (barbershop:
+  chair/barber count; a contractor might be crew size, number of concurrent projects, or
+  years in business — pick whatever's actually observable and meaningful for THIS
+  industry, not a forced analogy).
+- Utilization-equivalent (still the util_score field) → the industry-appropriate demand
+  signal identified in Step 1, not a forced "% booked." Re-derive the point thresholds
+  around whatever that real signal is (response speed, backlog/lead time, etc.) — don't
+  just relabel the barbershop thresholds with new units.
+- Funnel quality (funnel_score) → this industry's real conversion mechanism and what
+  "broken" looks like for it — an instant booking embed vs. an off-site redirect for a
+  barbershop; a missing or clunky quote-request form, phone-only contact with no online
+  path, or a slow-to-find estimate tool, for a contractor. Use that industry's own common
+  tools/platforms in the inference rules, not the barbershop ones — Setmore/Vagaro/Fresha
+  mean nothing to a roofer.
+
+--- EXISTING RUBRIC (barbershop) — reference for STRUCTURE and SCHEMA only, not content to copy verbatim ---
 {BASE_SCORING_PROMPT}
 --- END EXISTING RUBRIC ---
 
 Output ONLY the new rubric text, in the exact same plain-text format as above (same
-section headers and order: SIGNAL 1 — TEAM SCORE, SIGNAL 2 — UTILIZATION SCORE,
-SIGNAL 3 — FUNNEL SCORE, INFERENCE RULES FOR FUNNEL SCORE, RULES, OUTPUT). No preamble,
-no markdown code fences, no explanation before or after — the file you produce gets
-loaded verbatim as another module's system prompt."""
+section order: SIGNAL 1 — TEAM SCORE, SIGNAL 2 — UTILIZATION SCORE, SIGNAL 3 — FUNNEL
+SCORE, INFERENCE RULES FOR FUNNEL SCORE, RULES, OUTPUT). No preamble, no markdown code
+fences, no explanation before or after, and no trace of your Step 1 reasoning in the
+output — the file you produce gets loaded verbatim as another module's system prompt."""
 
 
 def generate_industry_scorer(industry: str, context: str = "") -> Path | None:
     """Drafts a new prompts/scoring_<slug>.txt for an SMB industry that doesn't have
-    one yet, in the same schema as prompts/scoring.txt. This is a plain single-call
-    function (same shape as scorer.py's score_shop) rather than a multi-turn loop —
-    drafting a rubric doesn't need tool use, it needs one well-built prompt. It's
-    also registered as a tool below so the dossier agent can call it itself mid-run
-    if it discovers the prospect isn't a barbershop."""
+    one yet, in the same schema as prompts/scoring.txt. Plain single-call function
+    (same shape as scorer.py's score_shop) rather than a multi-turn loop — drafting a
+    rubric doesn't need tool use, it needs one well-built prompt.
+
+    Two callers: the standalone `generate-scorer` CLI command (industry known ahead of
+    time), and get_scoring_rubric() below, which calls this once, up front, the first
+    time a dossier run hits a niche with no existing rubric. It is deliberately NOT a
+    tool the dossier agent can call mid-run anymore — see get_scoring_rubric's docstring
+    for why that used to be broken."""
     client = anthropic.Anthropic()
     user_message = f"Industry: {industry}\nContext: {context or '(none provided)'}\n\nDraft the new rubric now."
 
@@ -166,8 +228,7 @@ def generate_industry_scorer(industry: str, context: str = "") -> Path | None:
         lines = raw.splitlines()
         raw = "\n".join(lines[1:-1]).strip()
 
-    slug = _slugify(industry)
-    out_path = PROMPTS_DIR / f"scoring_{slug}.txt"
+    out_path = _rubric_path_for(industry)
     try:
         out_path.write_text(raw)
     except Exception as e:
@@ -178,30 +239,79 @@ def generate_industry_scorer(industry: str, context: str = "") -> Path | None:
     return out_path
 
 
+def get_scoring_rubric(niche: str, context: str = "") -> str:
+    """Resolves which scoring rubric text to use for a niche BEFORE the dossier loop
+    starts, instead of leaving the model to decide mid-run whether to call
+    generate_industry_scorer.
+
+    This replaces the old design, which had two real problems: (1) the system prompt
+    only told the model to generate a new rubric "before finalizing" — nothing forced
+    it to happen before scrape_site, so the agent could scrape and reason about funnel
+    quality using barbershop-specific criteria (Setmore/Vagaro language, % of slots
+    booked) before a construction- or dental-specific rubric ever existed. (2) even when
+    the model did call generate_industry_scorer mid-run, the tool result only returned
+    the file path it saved to — never the rubric's actual text — so the model could
+    never actually use the new rubric to score the business it was in the middle of
+    analyzing. The SCORING RUBRIC block baked into its system prompt for that whole run
+    stayed the hardcoded barbershop one regardless. The generated file was real and
+    useful for *future* runs, but decorative for the run that supposedly triggered it.
+
+    Resolving this up front removes the ambiguity entirely: barbershop (or no niche
+    given) always uses the canonical prompts/scoring.txt; any other niche reuses its
+    prompts/scoring_<slug>.txt if one already exists (no reason to re-spend an API call
+    regenerating a rubric that should stay stable run-over-run for the same industry);
+    only a genuinely new industry triggers generate_industry_scorer, and only once,
+    here — not buried as a judgment call inside the tool-use loop."""
+    slug = _slugify(niche)
+    if slug in ("barbershop", "industry", ""):
+        return BASE_SCORING_PROMPT
+
+    path = _rubric_path_for(niche)
+    if path.exists():
+        print(f"[agent_deepdive] Reusing existing rubric for '{niche}': {path}")
+        return path.read_text()
+
+    print(f"[agent_deepdive] No rubric exists yet for '{niche}' — generating one before starting the dossier.")
+    generated_path = generate_industry_scorer(niche, context)
+    if generated_path:
+        return generated_path.read_text()
+
+    print(f"[agent_deepdive] Rubric generation failed for '{niche}' — falling back to the barbershop rubric so the run can still proceed (scores will be less accurate for this niche).")
+    return BASE_SCORING_PROMPT
+
+
 # ---------------------------------------------------------------------------
 # Agentic dossier loop
 # ---------------------------------------------------------------------------
 
-DOSSIER_SYSTEM_PROMPT = f"""You are a prospect research analyst for an AI agency that fixes
+def build_dossier_system_prompt(rubric_text: str) -> str:
+    """Was a static module-level constant embedding the barbershop rubric directly.
+    Now a function so run_dossier_agent can build it fresh per run from whatever
+    get_scoring_rubric() resolved for that specific niche — see that function's
+    docstring for why the rubric has to be resolved before this prompt is built,
+    not decided by the model mid-conversation."""
+    return f"""You are a prospect research analyst for an AI agency that fixes
 booking funnels and local visibility for personal service SMBs, starting with barbershops.
 
 Given a business name (and optionally city/niche), gather real signal about it using the
 tools available and produce one final structured dossier by calling finalize_dossier
 exactly once, last. You decide the order of tool calls and whether to skip a step based
-on what you already know — do not follow a fixed sequence blindly. Examples of judgment
-calls you should make yourself: if find_business returns no website, skip scrape_site
-entirely and record that directly as a funnel signal ("no website at all" is itself the
-worst-case funnel score per the rubric below) — don't waste a call scraping nothing. If
-the niche clearly isn't "barbershop" (or whatever niche was given) and no scoring rubric
-exists yet for that industry, call generate_industry_scorer before finalizing so your
-scores are computed against the right rubric instead of forcing the barbershop one onto
-a business it doesn't fit.
+on what you already know — do not follow a fixed sequence blindly. Example judgment call:
+if find_business returns no website, skip scrape_site entirely and record that directly as
+a funnel signal ("no website at all" is itself the worst-case funnel score per the rubric
+below) — don't waste a call scraping nothing.
+
+The SCORING RUBRIC below has already been matched to this business's industry before this
+analysis started — if the niche isn't barbershop, this is either a rubric built
+specifically for that industry, or the canonical barbershop one used as a fallback. Either
+way, use exactly the rubric given below; you do not need to (and cannot) generate or select
+a different one mid-run.
 
 SCORING RUBRIC — use this to reason out team_score, util_score, funnel_score and verdict
 yourself for lead_record (do not just pattern-match; actually weigh the evidence you
 gathered against these rules):
 
-{BASE_SCORING_PROMPT}
+{rubric_text}
 
 Two things this agency's existing one-shot scorer does NOT do, that you must:
 
@@ -210,19 +320,23 @@ Two things this agency's existing one-shot scorer does NOT do, that you must:
    separately for this) — you reason about what it means. Most barbershop clientele comes
    through Instagram, not the website. A shop with no discoverable Instagram is a bigger
    red flag than a mediocre booking flow, not a minor footnote — weigh it that way in your
-   summary and leaks_found, and note it even when the rest of the funnel looks fine.
+   summary and leaks_found, and note it even when the rest of the funnel looks fine. (For
+   a non-barbershop niche, weigh this using your own judgment of how much that industry's
+   customers actually rely on social discovery — it may matter much less for, say, a
+   commercial roofing contractor than for a barbershop.)
 2. Funnel reasoning, not a rule lookup. Don't just apply the INFERENCE RULES as a
-   checklist. Write actual analysis: is the booking link an embed or does it redirect
-   off-site? Does it look like a specific service gets pre-selected, or does the visitor
-   land on a blank scheduler and have to figure it out themselves? Is there a clear
-   call-to-action a mobile visitor would actually see above the fold, based on how the
-   content is structured? Say why it's broken, not just that it is. Put this reasoning
+   checklist. Write actual analysis: is the booking/quote-request link an embed or does it
+   redirect off-site? Does it look like a specific service gets pre-selected, or does the
+   visitor land on something generic and have to figure it out themselves? Is there a
+   clear call-to-action a mobile visitor would actually see above the fold, based on how
+   the content is structured? Say why it's broken, not just that it is. Put this reasoning
    in funnel_analysis as real prose, a few sentences, not a restated rule.
 
 Be honest in your dossier about what you can't actually know from the outside — e.g.
-percent of appointment slots booked usually cannot be directly observed from a website
-scrape or Maps listing. Say so and give your best-evidence estimate rather than stating
-an unfounded number with false confidence.
+percent of appointment slots booked (or, for a quote/project business, how far out their
+project backlog actually runs) usually cannot be directly observed from a website scrape
+or Maps listing. Say so and give your best-evidence estimate rather than stating an
+unfounded number with false confidence.
 
 When you call finalize_dossier, lead_record must be filled in completely and must use
 exactly the same field names the pipeline's insert_lead() already expects, so Matthew can
@@ -260,22 +374,6 @@ TOOLS = [
             "type": "object",
             "properties": {"url": {"type": "string"}},
             "required": ["url"],
-        },
-    },
-    {
-        "name": "generate_industry_scorer",
-        "description": (
-            "Draft and save a new scoring rubric (same schema as prompts/scoring.txt) for an SMB "
-            "industry that doesn't have one yet. Only call this if the prospect's industry is not "
-            "barbershop and no matching prompts/scoring_<slug>.txt already exists."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "industry": {"type": "string"},
-                "context": {"type": "string", "description": "Brief context to steer the rubric"},
-            },
-            "required": ["industry"],
         },
     },
     {
@@ -360,16 +458,25 @@ def _dispatch_tool(name: str, tool_input: dict) -> dict:
             "truncated": truncated,
             "social": social,
         }
-    if name == "generate_industry_scorer":
-        path = generate_industry_scorer(tool_input.get("industry", ""), tool_input.get("context", ""))
-        return {"saved_to": str(path) if path else None}
     if name == "finalize_dossier":
         return {"status": "received"}
     print(f"[agent_deepdive] Unknown tool requested: {name}")
     return {"error": f"unknown tool '{name}'"}
 
 
-def run_dossier_agent(business_name: str, city: str = "Calgary", niche: str = "barbershop", max_turns: int = 5) -> dict | None:
+def run_dossier_agent(
+    business_name: str,
+    city: str = "Calgary",
+    niche: str = "barbershop",
+    context: str = "",
+    max_turns: int = 5,
+) -> dict | None:
+    # Resolved BEFORE the loop starts and BEFORE any scraping happens — see
+    # get_scoring_rubric's docstring. `context` only matters the first time this
+    # niche is seen (it steers generate_industry_scorer); ignored on reuse.
+    rubric_text = get_scoring_rubric(niche, context)
+    system_prompt = build_dossier_system_prompt(rubric_text)
+
     client = anthropic.Anthropic()
     messages = [
         {
@@ -386,7 +493,7 @@ def run_dossier_agent(business_name: str, city: str = "Calgary", niche: str = "b
             response = client.messages.create(
                 model=MODEL,
                 max_tokens=2000,
-                system=cached_system(DOSSIER_SYSTEM_PROMPT),
+                system=cached_system(system_prompt),
                 tools=TOOLS,
                 messages=messages,
             )
@@ -456,6 +563,11 @@ if __name__ == "__main__":
     p_dossier.add_argument("name", help="Business name")
     p_dossier.add_argument("--city", default="Calgary")
     p_dossier.add_argument("--niche", default="barbershop")
+    p_dossier.add_argument(
+        "--context",
+        default="",
+        help="Only used the first time this niche is scored — steers rubric generation (e.g. 'residential remodeler, not commercial').",
+    )
 
     p_gen = sub.add_parser("generate-scorer", help="Draft a new industry scoring rubric")
     p_gen.add_argument("industry", help="e.g. 'dental clinic'")
@@ -464,7 +576,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.command == "dossier":
-        result = run_dossier_agent(args.name, city=args.city, niche=args.niche)
+        result = run_dossier_agent(args.name, city=args.city, niche=args.niche, context=args.context)
         if result:
             print(json.dumps(result, indent=2))
         else:
