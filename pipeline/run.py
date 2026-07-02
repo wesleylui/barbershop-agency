@@ -1,4 +1,5 @@
 import argparse
+import sys
 from datetime import datetime, timezone
 
 from pipeline.maps import get_shops
@@ -152,7 +153,17 @@ if __name__ == "__main__":
     if args.city and args.niche:
         # Explicit flags: run exactly that query (scripting/testing).
         run_pipeline(args.city, args.niche)
-    else:
-        # No flags: show the manual menu and run the chosen query only.
+    elif sys.stdin.isatty():
+        # Interactive terminal (local run / `railway run`): show the manual menu.
         city, niche = prompt_for_query()
         run_pipeline(city, niche)
+    else:
+        # Non-interactive (e.g. Railway auto-runs startCommand on deploy): there's
+        # no stdin to answer the menu. Exit cleanly instead of crash-looping so the
+        # scrape only ever runs when a human triggers it manually.
+        print(
+            "No --city/--niche provided and no interactive terminal detected. "
+            "Skipping — trigger a scrape manually with `railway run python -m pipeline.run` "
+            "(shows the menu) or pass --city and --niche explicitly."
+        )
+        sys.exit(0)
