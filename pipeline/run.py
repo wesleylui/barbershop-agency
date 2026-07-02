@@ -6,6 +6,7 @@ from pipeline.scraper import scrape_website
 from pipeline.scorer import score_shop
 from pipeline.database import insert_lead, lead_exists, insert_pipeline_run
 from pipeline.notifier import post_run_summary
+from pipeline.search_queries import SEARCH_QUERIES
 
 
 def cheap_filter(shops: list[dict]) -> list[dict]:
@@ -115,9 +116,43 @@ def run_pipeline(city: str, niche: str):
     )
 
 
+def prompt_for_query() -> tuple[str, str]:
+    """Show a numbered menu of curated queries and return the chosen (city, niche)."""
+    print("Select a search to run:")
+    for i, q in enumerate(SEARCH_QUERIES, start=1):
+        print(f"  {i}) {q['niche']} — {q['city']}")
+    custom_option = len(SEARCH_QUERIES) + 1
+    print(f"  {custom_option}) Custom (enter your own niche + city)")
+
+    while True:
+        choice = input("> ").strip()
+        if not choice.isdigit():
+            print("Please enter a number.")
+            continue
+        n = int(choice)
+        if 1 <= n <= len(SEARCH_QUERIES):
+            q = SEARCH_QUERIES[n - 1]
+            return q["city"], q["niche"]
+        if n == custom_option:
+            niche = input("Niche: ").strip()
+            city = input("City: ").strip()
+            if niche and city:
+                return city, niche
+            print("Both niche and city are required.")
+            continue
+        print(f"Please enter a number between 1 and {custom_option}.")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the barbershop lead pipeline")
-    parser.add_argument("--city", default="Calgary")
-    parser.add_argument("--niche", default="barbershop")
+    parser.add_argument("--city")
+    parser.add_argument("--niche")
     args = parser.parse_args()
-    run_pipeline(args.city, args.niche)
+
+    if args.city and args.niche:
+        # Explicit flags: run exactly that query (scripting/testing).
+        run_pipeline(args.city, args.niche)
+    else:
+        # No flags: show the manual menu and run the chosen query only.
+        city, niche = prompt_for_query()
+        run_pipeline(city, niche)
