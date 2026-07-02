@@ -72,6 +72,8 @@ Stack, loaded via CDN classic `script` tags (works on double-click, no build):
 
 For the concrete, reusable code patterns — 3D signature object, GSAP reveals, card tilt+glow, floating-review marquee, animated grain, reduced-motion handling — read `references/build-recipe.md`.
 
+**If the subject is a barbershop or another personal-service local business** (salon, spa, gym, tattoo studio, med-spa) — also read `references/barbershop-personal-service-recipe.md` before building. It covers the section-by-section content architecture (services, gallery, team, booking) and the booking-flow conversion pattern for this category, including an honest note on what a static single-file build can and can't actually do for booking/email (don't let a confirmation-screen mockup get presented to the user as a working booking system).
+
 ---
 
 ## Step 4 — Self-critique before delivering
