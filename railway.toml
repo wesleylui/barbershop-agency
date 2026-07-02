@@ -2,7 +2,7 @@
 builder = "NIXPACKS"
 
 [deploy]
-startCommand = "python -m pipeline.run --city Calgary --niche barbershop"
-cronSchedule = "0 8 * * *"
+startCommand = "python -m pipeline.run"
+# cronSchedule = "0 8 * * *"   # PAUSED — resume manually once outreach backlog is cleared
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
